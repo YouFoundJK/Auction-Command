@@ -172,8 +172,6 @@ class FileSelectPage(tk.Frame):
         self.auction_name_entry = tk.Entry(container, font=get_font(14), width=35, relief=tk.FLAT, bd=2, insertbackground=THEME_TEXT_PRIMARY, bg=THEME_BG_SECONDARY, fg=THEME_TEXT_PRIMARY, highlightthickness=1, highlightbackground=THEME_BORDER_COLOR_LIGHT, highlightcolor=THEME_ACCENT_PRIMARY)
         self.auction_name_entry.insert(0, "MyAuction")
         self.auction_name_entry.pack(pady=5, ipady=8, fill=tk.X)
- 
-        # --- CSV Template Hyperlink ---
         csv_info_frame = tk.Frame(container, bg=THEME_BG_PRIMARY)
         csv_info_frame.pack(pady=(20,0), fill=tk.X)
         tk.Label(csv_info_frame, text="Select Initial Setup File (.csv):", font=get_font(14), bg=THEME_BG_PRIMARY, fg=THEME_TEXT_PRIMARY).pack(side=tk.LEFT, anchor="w")
@@ -741,6 +739,7 @@ class AuctionApp(tk.Frame):
         success, message = self.engine.load_state_from_json_string(json_state_string, loaded_timestamp, loaded_action_desc, loaded_serial_no)
         if success:
             self.refresh_all_ui_displays() # This will also call _emit_full_state_to_webview
+            self.full_reload_all_content() # Ensure all content is reloaded
             messagebox.showinfo("State Loaded", message, parent=self)
         else:
             messagebox.showerror("Load Error", message, parent=self)
@@ -946,6 +945,16 @@ class AuctionApp(tk.Frame):
         self.bid_status_label.config(text=status["status_text"], fg=fg_color)
         self.auction_name_label.config(text=self.engine.get_auction_name().upper())
 
+    def full_reload_all_content(self):
+        ''' Currently used in _handle_load_selected_state_from_history to ensure all UI displays 
+        are refreshed after loading a state. '''
+        if self.flask_server_running and self.socketio_instance:
+            if self.presenter_active:
+                self.socketio_instance.emit('reload_all_team_status', namespace='/presenter')
+            
+            if self.manager_access_enabled:
+                self.socketio_instance.emit('reload_all_team_status', namespace='/manager')
+    
     def refresh_all_ui_displays(self):
         # This method is called from the main Tkinter thread.
         self.update_team_cards_display()
@@ -956,11 +965,6 @@ class AuctionApp(tk.Frame):
         if self.flask_server_running and self.socketio_instance:
             # Ensure this is scheduled if refresh_all_ui_displays can be called from non-main thread
             self._emit_full_state_to_webview()
-            if self.presenter_active:
-                self.socketio_instance.emit('reload_all_team_status', namespace='/presenter')
-            
-            if self.manager_access_enabled:
-                self.socketio_instance.emit('reload_all_team_status', namespace='/manager')
             
     def _emit_full_state_to_webview(self):
         if not self.socketio_instance or not self.flask_server_running:
@@ -1065,65 +1069,62 @@ class AuctionApp(tk.Frame):
             messagebox.showwarning("Auction Engine Notice", full_warning_message, parent=self)
 
     def ui_select_item(self, player_name):
-        passed_item_name_for_event = None
-        item_passed_explicitly_by_ui = None # <--- INITIALIZE
-        passed_message_from_engine = None   # <--- INITIALIZE
-        item_that_might_be_auto_passed_by_engine = None # <--- INITIALIZE
+        # Name of item that IS actually passed, to be used for a single event emission.
+        name_of_item_confirmed_passed = None 
+
         try:
-            # Check if an item is active AND has bids.
+            # Case 1: Current item has bids, requires explicit pass confirmation
             if self.engine.bidding_active and self.engine.current_item_name and self.engine.highest_bidder_name:
-                 current_active_item_with_bids = self.engine.current_item_name # Capture name before potential pass
-                 
-                 if not messagebox.askyesno("Confirm Item Change", 
+                current_active_item_with_bids = self.engine.current_item_name
+                if not messagebox.askyesno("Confirm Item Change", 
                                            f"'{current_active_item_with_bids}' is active with bids from '{self.engine.highest_bidder_name}'.\n\n"
                                            f"Do you want to select '{player_name}' instead? \n"
                                            f"If yes, '{current_active_item_with_bids}' will be PASSED (returned to available players).", 
                                            icon='warning', parent=self):
                     return # User cancelled
 
-                 # If user confirmed, explicitly pass the current item with bids
-                 item_passed_explicitly_by_ui = self.engine.pass_current_item(
-                     reason_comment=f"'{current_active_item_with_bids}' passed (with bids) due to new selection of '{player_name}'."
-                 )
-                 messagebox.showinfo("Item Passed", f"'{item_passed_explicitly_by_ui}' (which had bids) was passed and returned to available players.", parent=self)
-                 
-                 # Emit event for this explicit pass by UI
-                 if self.socketio_instance and self.flask_server_running and item_passed_explicitly_by_ui:
-                     self.socketio_instance.emit('item_passed_event', {'item_name': item_passed_explicitly_by_ui}, namespace='/presenter')
+                # User confirmed: Explicitly pass the current item with bids
+                # engine.pass_current_item() returns the name of the item passed or None
+                passed_item_name = self.engine.pass_current_item(
+                    reason_comment=f"'{current_active_item_with_bids}' passed (with bids) due to new selection of '{player_name}'."
+                )
+                if passed_item_name:
+                    name_of_item_confirmed_passed = passed_item_name
+                    messagebox.showinfo("Item Passed", f"'{name_of_item_confirmed_passed}' (which had bids) was passed and returned to available players.", parent=self)
+                    # EMIT PASS EVENT HERE for the item that was explicitly passed
+                    if self.socketio_instance and self.flask_server_running:
+                        self.socketio_instance.emit('item_passed_event', {'item_name': name_of_item_confirmed_passed}, namespace='/presenter')
+                        self.socketio_instance.emit('item_passed_event', {'item_name': name_of_item_confirmed_passed}, namespace='/manager')
             
-            # If the above block was NOT entered, it means either:
-            # 1. No item was active OR
-            # 2. An item was active but had NO bids.
-            # In case 2, the engine's select_item_for_bidding will handle auto-passing it.
-            # We capture the name of the current item (if any) BEFORE calling select_item_for_bidding,
-            # as this is the item that *might* be auto-passed by the engine.
-            if not item_passed_explicitly_by_ui: # Only if UI didn't already pass an item
-                 item_that_might_be_auto_passed_by_engine = self.engine.current_item_name
+            # Now, select the new item.
+            # The engine's select_item_for_bidding will auto-pass the *previous* item 
+            # if it was active but had NO bids.
+            item_name_before_select_new = self.engine.current_item_name # Capture before select_item_for_bidding changes it
             
-            if item_passed_explicitly_by_ui: # From your existing logic
-                 passed_item_name_for_event = item_passed_explicitly_by_ui
-            elif passed_message_from_engine and item_that_might_be_auto_passed_by_engine: # From your existing logic
-                 passed_item_name_for_event = item_that_might_be_auto_passed_by_engine
+            passed_message_from_engine_select = self.engine.select_item_for_bidding(player_name)
 
+            if passed_message_from_engine_select: 
+                # This means engine auto-passed 'item_name_before_select_new' (which had NO bids).
+                # Ensure this is a different item than one explicitly passed above (if any).
+                if item_name_before_select_new and item_name_before_select_new != name_of_item_confirmed_passed:
+                    # Update name_of_item_confirmed_passed if this is a new pass event we need to send
+                    name_of_item_confirmed_passed = item_name_before_select_new 
+                    messagebox.showinfo("Item Auto-Passed", passed_message_from_engine_select, parent=self)
+                    # EMIT PASS EVENT HERE for the item auto-passed by engine
+                    if self.socketio_instance and self.flask_server_running:
+                        self.socketio_instance.emit('item_passed_event', {'item_name': name_of_item_confirmed_passed}, namespace='/presenter')
+                        self.socketio_instance.emit('item_passed_event', {'item_name': name_of_item_confirmed_passed}, namespace='/manager')
+                elif not item_name_before_select_new and passed_message_from_engine_select:
+                     # This case should ideally not happen if engine logic is sound (pass message implies an item was passed)
+                     print(f"WARNING: select_item_for_bidding returned pass message ('{passed_message_from_engine_select}') but no prior current item was identified by UI.")
 
-            # Now, call engine's select_item_for_bidding for the new player.
-            passed_message_from_engine = self.engine.select_item_for_bidding(player_name)
-
-            if passed_message_from_engine: 
-                # This means engine auto-passed an item that had NO bids
-                messagebox.showinfo("Item Auto-Passed", passed_message_from_engine, parent=self)
-                # Emit event for this auto-pass by engine
-                if self.socketio_instance and self.flask_server_running and item_that_might_be_auto_passed_by_engine:
-                     self.socketio_instance.emit('item_passed_event', {'item_name': item_that_might_be_auto_passed_by_engine}, namespace='/presenter')
 
         except AuctionError as e: 
             messagebox.showerror("Selection Error", str(e), parent=self)
         finally:
-            self.refresh_all_ui_displays() # This handles emitting full state
-            if passed_item_name_for_event and self.socketio_instance and self.flask_server_running:
-                # print(f"DEBUG UI (Tkinter): Emitting 'item_passed_event' for {passed_item_name_for_event}")
-                self.socketio_instance.emit('item_passed_event', {'item_name': passed_item_name_for_event}, namespace='/presenter')
-                self.socketio_instance.emit('item_passed_event', {'item_name': passed_item_name_for_event}, namespace='/manager')
+            self.refresh_all_ui_displays() # This emits full state for the NEWLY selected item.
+            # The item_passed_event is now emitted within the 'try' block if a pass occurred.
+            # No more item_passed_event emission here.
             self._check_and_display_engine_warnings()
 
     def ui_place_bid(self, team_name): # Called by Admin Panel
@@ -1182,11 +1183,8 @@ class AuctionApp(tk.Frame):
             item_name, winner, bid, message = self.engine.sell_current_item()
             messagebox.showinfo("Item Sold", message, parent=self)
             
-            player_data_engine = self.engine.players_initial_info.get(item_name) # Engine has sold it, so it's no longer current_item_name
-            player_photo_web_path = self._get_web_path(player_data_engine.get(PLAYER_PHOTO_PATH_KEY)) if player_data_engine else None
-            team_data_engine = self.engine.teams_data.get(winner)
-            team_logo_web_path = self._get_web_path(team_data_engine.get(TEAM_LOGO_PATH_KEY)) if team_data_engine else None
-
+            player_photo_web_path = self._get_web_path(item_name, is_logo=False) 
+            team_logo_web_path = self._get_web_path(winner, is_logo=True)
             sold_data_for_event = {
                 'player_name': item_name,
                 'player_photo_path': player_photo_web_path,
@@ -1196,7 +1194,7 @@ class AuctionApp(tk.Frame):
             }
         except AuctionError as e: messagebox.showerror("Sell Error", str(e), parent=self)
         finally:
-            self.refresh_all_ui_displays() # Emits full state (clearing current item)
+            self.refresh_all_ui_displays() 
             if sold_data_for_event and self.socketio_instance and self.flask_server_running:
                 # print(f"DEBUG UI (Tkinter): Emitting 'item_sold_event': {sold_data_for_event}")
                 self.socketio_instance.emit('item_sold_event', sold_data_for_event, namespace='/presenter')
@@ -1204,19 +1202,44 @@ class AuctionApp(tk.Frame):
             self._check_and_display_engine_warnings()
 
     def ui_pass_item(self):
-        passed_item_name_for_event = None
+        name_of_item_to_be_passed = None
         try:
-            # ... (your existing confirmation logic) ...
-            passed_item_name_for_event = self.engine.current_item_name # Get name before it's cleared by pass_current_item
-            passed_item_name = self.engine.pass_current_item()
-            messagebox.showinfo("Item Passed", f"'{passed_item_name}' passed/unsold.", parent=self)
-        except AuctionError as e: messagebox.showerror("Pass Error", str(e), parent=self)
+            name_of_item_to_be_passed = self.engine.current_item_name # Get name before it's cleared
+            if not name_of_item_to_be_passed:
+                messagebox.showinfo("Pass Item", "No item currently active to pass.", parent=self)
+                # No event to emit if nothing was to be passed.
+                # refresh_all_ui_displays in finally will ensure client reflects no item.
+                return # Exit early
+
+            # Optional: Confirmation if item has bids (good UX)
+            if self.engine.highest_bidder_name:
+                 if not messagebox.askyesno("Confirm Pass", 
+                                           f"'{name_of_item_to_be_passed}' has bids from '{self.engine.highest_bidder_name}'.\n\n"
+                                           f"Are you sure you want to pass this item?",
+                                           icon='warning', parent=self):
+                    return # User cancelled
+
+            # Proceed to pass the item
+            passed_item_name_from_engine = self.engine.pass_current_item()
+            
+            if passed_item_name_from_engine: # Engine confirmed an item was passed
+                messagebox.showinfo("Item Passed", f"'{passed_item_name_from_engine}' passed/unsold.", parent=self)
+                # EMIT PASS EVENT HERE, BEFORE full_state_update
+                if self.socketio_instance and self.flask_server_running:
+                    self.socketio_instance.emit('item_passed_event', {'item_name': passed_item_name_from_engine}, namespace='/presenter')
+                    self.socketio_instance.emit('item_passed_event', {'item_name': passed_item_name_from_engine}, namespace='/manager')
+            # If passed_item_name_from_engine is None, it means engine.pass_current_item determined there was nothing to pass
+            # (e.g., if state changed between name capture and pass call, though unlikely here).
+            # The initial check for name_of_item_to_be_passed should mostly cover this.
+
+        except AuctionError as e:
+            messagebox.showerror("Pass Error", str(e), parent=self)
+            # If an error occurred during pass, the actual pass might not have happened.
+            # refresh_all_ui_displays will send the current (possibly unchanged or error) state.
+            # No explicit item_passed_event if the pass itself failed.
         finally:
-            self.refresh_all_ui_displays() # Emits full state
-            if passed_item_name_for_event and self.socketio_instance and self.flask_server_running:
-                # print(f"DEBUG UI (Tkinter): Emitting 'item_passed_event' for {passed_item_name_for_event}")
-                self.socketio_instance.emit('item_passed_event', {'item_name': passed_item_name_for_event}, namespace='/presenter')
-                self.socketio_instance.emit('item_passed_event', {'item_name': passed_item_name_for_event}, namespace='/manager')
+            self.refresh_all_ui_displays() # Emits full state (which will show item as null and bid status cleared if pass was successful)
+            # item_passed_event is now emitted in the 'try' block above, BEFORE this refresh.
             self._check_and_display_engine_warnings()
 
     def _create_shutdown_overlay(self, initial_message="Please Wait: Initializing shutdown..."):

@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Auction Presenter: Live Auction</title>
+    <link rel="icon" href="\assets\auction-command-icon.ico" type="image/x-icon">
+    <link rel="shortcut icon" href="\assets\auction-command-icon.ico" type="image/x-icon">
     <link rel="stylesheet" href="static/css/presenter_view.css">
     <script src="static/js/socket.io.js"></script>
 </head>
@@ -22,7 +24,7 @@
             <img src="/static/images/logo_placeholder_left.png" alt="Organizer Logo" id="left-logo">
         </div>
         <div class="auction-title">
-            <h1 id="auction-name">LIVE AUCTION</h1>
+            <h1 id="auction-name">{{ auction_name }}</h1>
             <div class="live-indicator">
                 <span class="live-dot"></span>
                 <span>LIVE</span>
@@ -86,13 +88,14 @@
 
         <!-- Sold Animation Overlay -->
         <div id="sold-overlay" class="sold-overlay">
+            <canvas id="fireworksCanvas"></canvas>
             <div class="sold-content">
                 <div class="sold-player">
                     <img id="sold-player-image" src="#" alt="Sold Player">
                     <h3 id="sold-player-name">Player Name</h3>
                 </div>
                 <div class="sold-text">
-                    <h1>SOLD!</h1>
+                    <h1> SOLD TO </h1>
                     <p id="sold-price">₹0</p>
                 </div>
                 <div class="sold-team">
