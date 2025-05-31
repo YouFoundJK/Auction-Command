@@ -19,6 +19,10 @@ CSV_DELIMITER = ','
 LOG_SECTION_PLAYER_ROLES = "[PLAYER_ROLES]" # Actual section format for future
 LOG_SECTION_ROSTER_RULES = "[ROSTER_RULES]" # Actual section format for future
 
+# Keys for CSV and internal data
+PLAYER_PHOTO_PATH_KEY = "Profile Photo Path"
+TEAM_LOGO_PATH_KEY = "Logo Path"
+
 class AuctionError(Exception):
     """Base class for auction-specific errors."""
     pass
@@ -45,8 +49,8 @@ class AuctionEngine:
     def __init__(self):
         # Core auction state
         self.auction_name = "Untitled Auction"
-        self.teams_data = {}  # {team_name: {"money": int, "inventory": {player_name: bid_amount}, "id": team_id}}
-        self.players_initial_info = {}  # {player_name: {"base_bid": int, "id": player_id}}
+        self.teams_data = {}  # {team_name: {"money": int, "inventory": {player_name: bid_amount}, "id": team_id, "logo_path": str}}
+        self.players_initial_info = {}  # {player_name: {"base_bid": int, "id": player_id, "photo_path": str}}
         self.players_available = {}  # {player_name: base_bid} (subset of players_initial_info)
 
         # Bidding state
@@ -110,7 +114,7 @@ class AuctionEngine:
         return errors
 
     def setup_new_auction(self, auction_name_from_setup, teams_list_dicts, players_list_dicts):
-        self._clear_state() # Also resets bid_increment_rules to default
+        self._clear_state()
         self.auction_name = auction_name_from_setup
         
         safe_name = re.sub(r'[^\w\s_.-]', '', self.auction_name).strip().replace(' ', '_')
@@ -121,33 +125,34 @@ class AuctionEngine:
         for i, team_dict in enumerate(teams_list_dicts):
             name = team_dict["Team name"]
             money = int(team_dict["Team starting money"])
+            logo_path = team_dict.get(TEAM_LOGO_PATH_KEY, None) # Get logo path, default to None
             team_id = f"T{i+1}"
             if not name.strip():
                 raise InitializationError(f"Team name cannot be empty (from input data for team {i+1}).")
-            self.teams_data[name] = {"money": money, "inventory": {}, "id": team_id}
+            self.teams_data[name] = {"money": money, "inventory": {}, "id": team_id, "logo_path": logo_path}
             self.team_name_to_id[name] = team_id
             self.team_id_to_name[team_id] = name
 
         for i, player_dict in enumerate(players_list_dicts):
             name = player_dict["Player name"]
             base_bid = int(player_dict["Bid value"])
+            photo_path = player_dict.get(PLAYER_PHOTO_PATH_KEY, None) # Get photo path, default to None
             player_id = f"P{101+i}"
             if not name.strip():
                 raise InitializationError(f"Player name cannot be empty (from input data for player {i+1}).")
-            self.players_initial_info[name] = {"base_bid": base_bid, "id": player_id}
+            self.players_initial_info[name] = {"base_bid": base_bid, "id": player_id, "photo_path": photo_path}
             self.players_available[name] = base_bid
             self.player_name_to_id[name] = player_id
             self.player_id_to_name[player_id] = name
-        
+
         if not self.teams_data:
             raise InitializationError("No teams provided for the new auction.")
         if not self.players_initial_info:
             raise InitializationError("No players provided for the new auction.")
 
-        # Note: set_bid_increment_rules() will be called after this if custom rules from CSV
-        self._init_logger_for_new_auction() # This will log the current bid_increment_rules (defaults at this point)
+        self._init_logger_for_new_auction()
         self.log_auction_state("INITIAL_SETUP", "Initial auction state established.")
-
+        
     def set_bid_increment_rules(self, rules_list_of_tuples):
         """Sets custom bid increment rules, typically from CSV. Overwrites defaults."""
         if rules_list_of_tuples and isinstance(rules_list_of_tuples, list):
@@ -185,7 +190,6 @@ class AuctionEngine:
             self.bid_increment_rules.sort(key=lambda x: x[0], reverse=True)
             if rules_list_of_tuples is not None : # If it was explicitly not None, it was bad format
                  self._add_error("Custom bid increment rules not in expected list format; using defaults.")
-
 
     def load_auction_from_log(self, log_filepath):
         self._clear_state()
@@ -276,31 +280,36 @@ class AuctionEngine:
             elif current_section == LOG_SECTION_TEAMS_INITIAL: # Simplified, assuming CSV from engine
                 if line_cont.startswith('#'): continue 
                 try:
-                    if len(row) >= 3:
+                    # Expecting: TeamName, TeamID, StartingMoney, LogoPath (optional)
+                    if len(row) >= 3: # Min 3 columns
                         name, team_id, money_str = row[0].strip(), row[1].strip(), row[2].strip()
+                        logo_path = row[3].strip() if len(row) >= 4 else None # Get logo path if present
                         if not name: self._add_error(f"LogParse (Teams L{row_num+1}): Empty name. Skip: {row}"); continue
                         if not team_id: self._add_error(f"LogParse (Teams L{row_num+1}): Empty ID for '{name}'. Skip: {row}"); continue
-                        self.teams_data[name] = {"money": int(money_str), "inventory": {}, "id": team_id}
+                        self.teams_data[name] = {"money": int(money_str), "inventory": {}, "id": team_id, "logo_path": logo_path}
                         self.team_name_to_id[name] = team_id; self.team_id_to_name[team_id] = name
                         initial_teams_loaded = True
                     else: self._add_error(f"LogParse (Teams L{row_num+1}): Malformed. Skip: {row}")
                 except (ValueError, IndexError) as e: self._add_error(f"LogParse (Teams L{row_num+1}): Error {e}. Skip: {row}")
 
-            elif current_section == LOG_SECTION_PLAYERS_INITIAL: # Simplified
-                if line_cont.startswith('#'): continue 
+            elif current_section == LOG_SECTION_PLAYERS_INITIAL:
+                if line_cont.startswith('#'): continue
                 try:
-                    if len(row) >= 3:
+                    # Expecting: PlayerName, PlayerID, BaseBid, ProfilePhotoPath (optional)
+                    if len(row) >= 3: # Min 3 columns
                         name, player_id, bid_str = row[0].strip(), row[1].strip(), row[2].strip()
+                        photo_path = row[3].strip() if len(row) >= 4 else None # Get photo path if present
                         if not name: self._add_error(f"LogParse (Players L{row_num+1}): Empty name. Skip: {row}"); continue
                         if not player_id: self._add_error(f"LogParse (Players L{row_num+1}): Empty ID '{name}'. Skip: {row}"); continue
                         base_bid = int(bid_str)
-                        self.players_initial_info[name] = {"base_bid": base_bid, "id": player_id}
+                        self.players_initial_info[name] = {"base_bid": base_bid, "id": player_id, "photo_path": photo_path}
                         self.player_name_to_id[name] = player_id; self.player_id_to_name[player_id] = name
                         initial_players_loaded = True
                     else: self._add_error(f"LogParse (Players L{row_num+1}): Malformed. Skip: {row}")
                 except (ValueError, IndexError) as e: self._add_error(f"LogParse (Players L{row_num+1}): Error {e}. Skip: {row}")
         
         if temp_bid_rules_from_log:
+            # ... (bid rules loading same)
             self.bid_increment_rules = temp_bid_rules_from_log
             self.bid_increment_rules.sort(key=lambda x: x[0], reverse=True)
         else: # No rules in log, ensure defaults are set and sorted
@@ -399,13 +408,21 @@ class AuctionEngine:
                 f.write(f"#BidIncrementRules{CSV_DELIMITER}{json.dumps(self.bid_increment_rules)}\n\n") 
                 
                 f.write(f"{LOG_SECTION_TEAMS_INITIAL}\n")
-                team_writer = csv.writer(f); team_writer.writerow(["#TeamName", "TeamID", "StartingMoney"])
-                for name, data in self.teams_data.items(): team_writer.writerow([name, data["id"], data["money"]])
-                
+                team_writer = csv.writer(f)
+                # Add Logo Path to header
+                team_writer.writerow(["#TeamName", "TeamID", "StartingMoney", TEAM_LOGO_PATH_KEY])
+                for name, data in self.teams_data.items():
+                    # Add logo_path to row, ensure it's an empty string if None for CSV
+                    team_writer.writerow([name, data["id"], data["money"], data.get("logo_path", "")])
+
                 f.write("\n"); f.write(f"{LOG_SECTION_PLAYERS_INITIAL}\n")
-                player_writer = csv.writer(f); player_writer.writerow(["#PlayerName", "PlayerID", "BaseBid"])
-                for name, data in self.players_initial_info.items(): player_writer.writerow([name, data["id"], data["base_bid"]])
-                
+                player_writer = csv.writer(f)
+                # Add Profile Photo Path to header
+                player_writer.writerow(["#PlayerName", "PlayerID", "BaseBid", PLAYER_PHOTO_PATH_KEY])
+                for name, data in self.players_initial_info.items():
+                    # Add photo_path to row, ensure it's an empty string if None for CSV
+                    player_writer.writerow([name, data["id"], data["base_bid"], data.get("photo_path", "")])
+
                 f.write("\n"); f.write(f"{LOG_SECTION_AUCTION_STATES}\n")
                 event_writer = csv.writer(f); event_writer.writerow(["#Timestamp", "ActionDescription", "JSONStateSnapshot", "Comment"])
             self._reopen_logger_for_append()
@@ -466,20 +483,38 @@ class AuctionEngine:
 
     def select_item_for_bidding(self, player_name):
         if player_name not in self.players_available:
-            raise ItemNotSelectedError(f"Player '{player_name}' not available.")
+            # This case should ideally not be reached if UI filters correctly,
+            # or if an item is explicitly passed by UI before selecting a new one.
+            raise ItemNotSelectedError(f"Player '{player_name}' not available or already selected.")
+        
         passed_item_message = None
+        
+        # Auto-pass the *previous* item ONLY if it was active AND had NO bids.
+        # If it had bids, the UI is responsible for calling pass_current_item() explicitly 
+        # BEFORE calling this method.
         if self.bidding_active and self.current_item_name and not self.highest_bidder_name:
-            prev_item_name = self.current_item_name
-            self.log_auction_state(f"PASS_ITEM_AUTO: {prev_item_name}", f"'{prev_item_name}' passed (new selection).")
-            passed_item_message = f"Previous item '{prev_item_name}' was passed (no bids)."
+            prev_item_name_auto_passed = self.current_item_name
+            
+            # Add the auto-passed item back to available list
+            if prev_item_name_auto_passed and prev_item_name_auto_passed in self.players_initial_info:
+                self.players_available[prev_item_name_auto_passed] = self.players_initial_info[prev_item_name_auto_passed]["base_bid"]
+            
+            self.log_auction_state(f"PASS_ITEM_AUTO: {prev_item_name_auto_passed}", f"'{prev_item_name_auto_passed}' passed (new selection, no bids).")
+            passed_item_message = f"Previous item '{prev_item_name_auto_passed}' was passed (no bids)."
 
+        # --- Set up the new item ---
         self.current_item_name = player_name
         self.current_item_base_bid = self.players_initial_info[player_name]["base_bid"]
-        self.current_bid_amount = self.current_item_base_bid
-        self.highest_bidder_name = None
-        self.bid_history_for_current_item = [(None, self.current_bid_amount)]
+        self.current_bid_amount = self.current_item_base_bid # Reset bid amount to base for new item
+        self.highest_bidder_name = None # Reset highest bidder for new item
+        self.bid_history_for_current_item = [(None, self.current_bid_amount)] # Start history with base bid
         self.bidding_active = True
-        if player_name in self.players_available: del self.players_available[player_name]
+        
+        # Remove the NEWLY selected player from available list.
+        # This must happen AFTER any auto-pass logic for the previous item might have re-added it.
+        if player_name in self.players_available: 
+            del self.players_available[player_name]
+        
         self.log_auction_state(f"SELECT_ITEM: {player_name}", f"{player_name} selected for auction.")
         return passed_item_message
 
@@ -529,10 +564,19 @@ class AuctionEngine:
     def pass_current_item(self, reason_comment="Player passed/unsold by auctioneer."):
         if not self.bidding_active or not self.current_item_name: raise ItemNotSelectedError("No item active.")
         passed_item_name = self.current_item_name
+        
+        # Add the passed item back to available players
         if passed_item_name and passed_item_name in self.players_initial_info:
              self.players_available[passed_item_name] = self.players_initial_info[passed_item_name]["base_bid"]
-        self.current_item_name = None; self.current_item_base_bid = 0; self.current_bid_amount = 0
-        self.highest_bidder_name = None; self.bid_history_for_current_item = []; self.bidding_active = False
+        
+        # Reset bidding state
+        self.current_item_name = None
+        self.current_item_base_bid = 0
+        self.current_bid_amount = 0
+        self.highest_bidder_name = None
+        self.bid_history_for_current_item = []
+        self.bidding_active = False
+        
         self.log_auction_state(f"PASS_ITEM: {passed_item_name}", reason_comment)
         return passed_item_name
 
@@ -557,33 +601,54 @@ class AuctionEngine:
         return { "item_display_name": item_display_name, "status_text": status_text, "status_color_key": status_color_key, "bidding_active": self.bidding_active }
     def get_log_filepath(self): return self.log_filepath
 
+    def get_next_potential_bid_amount(self):
+        if not self.bidding_active or not self.current_item_name:
+            return None # Or 0, depending on how you want to handle no active item
+
+        # This is the same logic as _calculate_next_bid_amount
+        # but we don't want to *change* current_bid_amount here, just calculate
+        current_bid_for_calc = self.current_bid_amount
+        increment_to_use = 1 # Default if no rules match or bid is very low
+        
+        # self.bid_increment_rules is sorted high-to-low threshold
+        for threshold, increment_val in self.bid_increment_rules:
+            if current_bid_for_calc >= threshold:
+                increment_to_use = increment_val
+                break
+        
+        if self.highest_bidder_name: # If there's a bid, next bid is current + increment
+            return current_bid_for_calc + increment_to_use
+        else: # If no bids yet (item just opened), the "next" bid is the opening bid
+            return current_bid_for_calc
+
 def generate_template_csv_content():
     """Generates the content for a template CSV file that works directly
     with the current FileSelectPage parser."""
-    # Using constants for section names
     template_str = f"""{LOG_SECTION_CONFIG}
 {LOG_KEY_AUCTION_NAME},My New Auction
 # You can add other specific configurations here if the engine supports them.
 # Each config should be on a new line: Key{CSV_DELIMITER}Value
 
 {LOG_SECTION_TEAMS_INITIAL}
-Team name,Team starting money
-# ^ This line above is the REQUIRED header for the all sections. Do not change its format.
+Team name,Team starting money,{TEAM_LOGO_PATH_KEY}
+# ^ This line above is the REQUIRED header for all the sections. Do not change its format.
 # Add your team data below, one team per line:
-Team Alpha,5000
-Team Bravo,4800
-Team Charlie,5200
+# (Optional) Logo format '[Team-name-logo.ext]'; location static/images directory.
+Team Alpha,5000,Team-Alpha-logo.png
+Team Bravo,4800,Team-Bravo-logo.jpg
+Team Charlie,5200,Team-Charlie-logo.gif
 
 {LOG_SECTION_PLAYERS_INITIAL}
-Player name,Bid value
-# ^ This line above is the REQUIRED header for the all sections. Do not change its format.
+Player name,Bid value,{PLAYER_PHOTO_PATH_KEY}
+# ^ This line above is the REQUIRED header for all the sections. Do not change its format.
 # Add your player data below, one player per line:
-Player One,100
-Player Two,80
-Player Three (WK),75
-Player Four (BAT),120
-Player Five (BOWL),90
-Player Six (ALL),110
+# (Optional) Profile photo format '[Player-name.ext]'; location static/images directory.
+Player One,100,Player-One.png
+Player Two,80,
+Player Three (WK),75,Player-Three-(WK).png
+Player Four (BAT),120,
+Player Five (BOWL),90,
+Player Six (ALL),110,
 
 {LOG_SECTION_BID_INCREMENT_RULES}
 # This section is optional. If omitted, or if all rules are commented out,
